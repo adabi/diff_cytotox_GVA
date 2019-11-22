@@ -1,0 +1,446 @@
+
+```{r}
+
+df <-
+  df_scaled %>% 
+  unite(Group, Group, Treatment, sep = " ")
+
+df_grouped <-
+  df %>% 
+  group_by(Group)
+
+df_splt_lst <-
+  df_grouped %>% 
+  group_split()
+
+analytes <- (names(df[-1]))
+
+
+min_values <- vector()
+max_values <- vector()
+
+for (dataframe in df_splt_lst){
+  slice <- dataframe[,-1]
+  na_counts <- apply(slice, 2, function(x) length(which(!is.na(x))))
+  min_values <- c(min_values, min(na_counts))
+}
+min_value <- min(min_values)
+origian_min_value <- min_value
+min_value <- roundDown(min_value)
+min_value <- min(min_value, 500)
+num_of_iterations <- 500
+
+ 
+df_stat_summary <- 
+  lapply (seq_len(num_of_iterations), function(y) {
+    
+  subsampled_df <- 
+    lapply(seq_along(df_splt_lst), function(group) {
+      df_splt_lst[[group]] %>%
+        mutate_if(is.numeric, function(x) {
+          sampled <- sample(na.omit(x), size=min_value)
+          c(sampled, rep(NaN, length(x) - min_value))
+          }) %>% drop_na()
+    }) %>% 
+    bind_rows() %>% 
+    separate("Group", into=c("Group", "Treatment"), sep=" ") %>% 
+    mutate(Treatment =  as.numeric(Treatment))
+
+  write.csv(subsampled_df, "subsampled_df.csv")
+  mancova(data=subsampled_df, deps=(analytes), factors=Group, covs=Treatment, multivar="hotel")$univar$asDF %>%
+    filter(term == "Group" | term == "Treatment") %>% 
+    select(term, dep, p)
+}) %>% bind_rows()
+
+```
+
+```{r}
+library(tidyverse)
+library(jmv)
+library(dplyr)
+
+
+# Function to round down to the nearest number consisting of zeros except for the digit in the highest base position
+roundDown <- function(x) {
+  num_dgts <- nchar(x)
+  result <- floor(x/10^(num_dgts - 1)) * 10^(num_dgts - 1)
+  return(result)
+}
+
+df <- read.csv(file="Full Raw Data Alternative.csv", check.names = FALSE)
+
+
+
+df <- 
+  df %>% 
+  rename('IL-1\u03B1' = 'IL-1a',
+         'MIP-1\u03B1' = 'MIP-1a',
+         'TNF-\u03B1' = 'TNF-a',
+         'IFN-\u03B3' = 'IFN-y',
+         'IL-1\u03B2' = 'IL-1b')
+
+# Function to remove outliers using Tukey's Fences. Returns FALSE for outliers
+isnt_out_tukey <- function(x, k = 1.5, na.rm = TRUE) {
+  quar <- quantile(x, probs = c(0.25, 0.75), na.rm = na.rm)
+  iqr <- diff(quar)
+  
+  !((quar[1] - k * iqr <= x) & (x <= quar[2] + k * iqr))
+}
+
+replace_outliers <- function(y){
+  replace(y, isnt_out_tukey(y), NaN)
+}
+
+
+df_splt_lst <- 
+  df %>% 
+  split(.$Group)
+
+df_no_out <- 
+  lapply(names(df_splt_lst), function(group){
+    df_splt_lst[[group]] %>% 
+      mutate_if(is.numeric, replace_outliers)
+  }) %>% bind_rows()
+
+df <- df_no_out
+
+df_sep <- 
+  df %>% 
+  separate("Group", into=c("Group", "Treatment"), sep=" ")
+
+df_splt_sep <-
+  df_sep %>% 
+  split(.$Group)
+
+df_scaled <-
+  lapply(names(df_splt_sep), function(group){
+    print(group)
+    means_df <-
+      df_sep %>% 
+      filter(Group == group, Treatment == "0") %>% 
+      group_by(Group, Treatment) %>% 
+      summarise_all(function(x) mean(x, na.rm = TRUE)) %>% 
+      ungroup
+    
+    df_splt_sep[[group]] %>% 
+      mutate_if(is.numeric, funs ({
+        mean <- 
+          means_df %>%
+          select(quo_name(quo(.))) %>% 
+          pull
+        
+        ((. - mean) / sd(., na.rm = TRUE))  + 2
+      }))
+  }) %>% bind_rows()
+```
+
+
+```{r}
+
+alpha_corrected <- 1-(1-0.05)^(1/5)
+
+df_stat_summary_group <-
+  df_stat_summary %>% 
+  filter(term == 'Group') %>% 
+  group_by(term, dep) %>% 
+  summarise(stderr = sd(p)/sqrt(length(p)), p = mean(p)) %>% 
+  ungroup
+
+ggplot(data=df_stat_summary_group, mapping = aes(x=dep, y=p)) +
+  geom_point(color='blue') +
+  geom_errorbar(aes(ymin = p-stderr, ymax=p+stderr), width=0.2) +
+  geom_hline(yintercept = alpha_corrected, linetype="dashed", color = "red") +
+  theme_bw(base_size = 10) + 
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs (title = "Subsampling p-values from Mancova Test - Significance by Group", x = "Analyte", y = "p-value")
+
+ggsave('./Graphs/MANCOVAByGroup.png', device ='png')
+
+df_stat_summary_treatment <- 
+  df_stat_summary %>% 
+  filter(term == 'Treatment') %>% 
+  group_by(term, dep) %>% 
+  summarise(stderr = sd(p)/sqrt(length(p)), p = mean(p)) %>% 
+  ungroup
+
+ggplot(data=df_stat_summary_treatment, mapping = aes(x=dep, y=p)) +
+  geom_point(color = 'blue') +
+  geom_errorbar(aes(ymin = p-stderr, ymax=p+stderr), width=0.2) +
+  geom_hline(yintercept = alpha_corrected, linetype="dashed", color = "red") +
+  theme_bw(base_size = 10) + 
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs (title = "Subsampling p-values from Mancova Test - Significance by Treatment", x = "Analyte", y = "p-value")
+
+ggsave('./Graphs/MANCOVAByTreatment.png', device ='png')
+```
+
+```{r}
+library(dunn.test)
+library(scales)
+library(tidyverse)
+library(stats)
+
+
+
+df_means <- 
+  df_scaled %>% 
+  group_by(Group, Treatment) %>% 
+  summarise_all(function(x) mean(x, na.rm = TRUE)) %>% 
+  ungroup
+
+analytes <- names(df_means)[-(1:2)]
+
+df_err <-
+  df_scaled %>% 
+  group_by(Group, Treatment) %>% 
+  summarise_all(function(x) sd(x, na.rm = TRUE)/sqrt(sum(!is.na(x)))) %>% 
+  ungroup
+
+df_max_y <- 
+  bind_rows(df_means, df_err) %>% 
+  group_by(Group, Treatment) %>% 
+  summarise_all(sum) %>% 
+  ungroup
+
+df_min_y <- 
+  bind_rows(df_err, df_means) %>% 
+  group_by(Group, Treatment) %>% 
+  summarise_all(diff) %>% 
+  ungroup
+
+
+plot_data <- function(analyte, test_significance=TRUE){
+  
+  y_err_max <- 
+    df_max_y %>% 
+    select(!!as.name(analyte)) %>% 
+    pull
+  
+  y_err_min <-
+    df_min_y %>% 
+    select(!!as.name(analyte)) %>% 
+    pull
+  
+  max_height = max(y_err_max)
+  
+  unit <- max_height / 25
+  groups <- unique(df_means$Group)
+  treatments <- unique(df_means$Treatment)
+  bar_width = 0.5/3
+  
+  integer_breaks <- function(x) seq(floor(min(x)), ceiling(max(x)))
+  
+  plt <- 
+    ggplot(df_means, aes_string(y=as.name(analyte), x="Group", fill="Treatment")) + 
+    geom_bar(position="dodge", stat="identity", width=0.5) + 
+    geom_errorbar(aes(ymin=y_err_min, ymax=y_err_max), width=.2, position=position_dodge(.5)) +
+    labs(title = analyte, x="Cell Group", y="Normalized Fluorescence", fill='UF-DEP Concentration (μg/ml)') + 
+    scale_y_continuous(breaks = integer_breaks) +
+    theme_bw()
+  
+  p_val <- 
+  df_stat_summary_group %>% 
+  filter(dep == analyte) %>% 
+  select(p) %>% 
+  pull
+  
+  if (length(p_val) == 0) p_val <- 0
+
+  if (p_val < alpha_corrected){
+    data_df <-
+    df %>%
+    separate(Group, into=c("Group", "Treatment"), sep = " ") %>%
+    filter(Treatment == "20") %>%
+    select(Group, !!as.name(analyte))
+
+    names(data_df)[2] = 'response'
+    attach(data_df)
+    PT <- dunn.test(response, g=Group, method = 'bh')
+    detach(data_df)
+
+
+    compars <- cldList(comparison = PT$comparisons,
+    p.value    = PT$P.adjust,
+    threshold  = alpha_corrected)
+    lets <- compars$Letter
+
+  } else {
+    lets <- c('a', 'a', 'a')
+  }
+  
+  lets <- rep(lets, each=2)
+  y_letters <-
+    df_max_y %>%
+    group_by(Group) %>%
+    summarise(max_height = max(!!as.name(analyte))) %>%
+    select(max_height) %>%
+    pull
+
+  y_letters <- rep(y_letters, each = 2) + 3 * unit
+  x_letters <- rep(c(1,2,3), each = 2)
+
+ plt <- (plt + geom_text(aes(x=x_letters, y = y_letters, label=lets)))
+ 
+ treatment_p_val <- 
+        df_stat_summary_treatment %>% 
+        filter(dep == analyte) %>% 
+        select(p) %>% 
+        pull
+        
+ if (length(treatment_p_val) == 0) treatment_p_val <- 0
+ 
+ if (treatment_p_val <= corrected_alpha){ 
+  for (i in 1:length(groups)){
+    group = groups[i]
+    group_starting_x <- i - (length(treatments) * bar_width)/2
+    x_values = list()
+    y_offset <- 0
+    highest_treatment_in_group <- 
+      df_max_y %>% 
+      select(Group, Treatment, !!as.name(analyte)) %>% 
+      filter(Group == group) %>% 
+      group_by(Group) %>% 
+      summarise(max_height = max(!!as.name(analyte))) %>% 
+      select(max_height) %>% 
+      pull
+
+
+    for (j in 1:(length(treatments) -1 )){
+  
+
+      for (k in (j + 1):length(treatments)){
+       
+        max_treatment_height <-highest_treatment_in_group
+        
+        x_values <- c(group_starting_x + j*bar_width - bar_width/2 + bar_width/10,
+                      group_starting_x + j*bar_width - bar_width/2 + bar_width/10,
+                      group_starting_x + k*bar_width - bar_width/2 - bar_width/10,
+                      group_starting_x + k*bar_width - bar_width/2 - bar_width/10)
+        
+        y_pos <- max_treatment_height + 0.5 * unit
+
+
+
+        y_values <- c(y_pos, y_pos+0.8*unit, y_pos+0.8*unit, y_pos)
+        x_text <- (group_starting_x + j*bar_width - bar_width/2 + bar_width/10 + group_starting_x + k*bar_width - bar_width/2 - bar_width/10)/2
+    
+        y_text <- y_pos + 1.25 * unit
+        df_line <- data.frame(x=x_values,y=y_values, Treatment = rep(c('0'), 2))
+        
+        df_wilcox <- 
+          df_scaled %>% 
+          filter(Group == group) %>% 
+          select(Group, Treatment, !!as.name(analyte)) %>% 
+          mutate(Treatment = as.numeric(Treatment))
+        
+        wilcox_x <- 
+          df_wilcox %>% 
+          filter(Treatment == treatments[j]) %>% 
+          select(!!as.name(analyte)) %>% 
+          pull
+        
+        wilcox_y <-
+          df_wilcox %>% 
+          filter(Treatment == treatments[k]) %>% 
+          select(!!as.name(analyte)) %>% 
+          pull
+        
+        wilcox_p_val <- wilcox.test(x=wilcox_x, y=wilcox_y)$p.val
+        if (wilcox_p_val < corrected_alpha) {
+          lbl <- "*"
+        } else {
+          lbl <- "n.s."
+        }
+        
+          
+        plt <- plt + geom_line(data=df_line, aes(x=x,y=y)) + annotate("text",label=lbl, x=x_text, y=y_text, color="black")
+      }
+    }
+  }}
+ 
+ return(plt)
+}  
+
+
+plts <-
+  invisible(lapply(analytes, plot_data))
+
+lapply(seq_len(length(analytes)), function(i){
+  if (analytes[[i]] == 'GRO/KC/CINC-1') {
+    analyte_name <- 'GRO-KC-CINC-1'
+  } else {
+    analyte_name <- analytes[[i]]
+  }
+    
+  file_name <- sprintf('./Graphs/Analytes/%s.png', analyte_name)
+  ggsave(filename = file_name, plot = plts[[i]], device="png")
+})
+```
+
+
+```{r}
+stderr <- function(x, na.rm=FALSE) {
+  if (na.rm) x <- na.omit(x)
+  sqrt(var(x)/length(x))
+}
+
+
+
+df_scaled_sig <-
+  df_scaled %>% 
+  pivot_longer(cols = c(-Group, -Treatment), names_to='Analyte', values_to = 'Value') %>% 
+  pivot_wider(names_from = 'Treatment', names_prefix = "treatment_", values_from = 'Value')
+
+df_scaled_sig <-
+  df_scaled_sig %>% 
+  group_by(Group, Analyte) %>% 
+  mutate(p_val = wilcox.test(unlist(treatment_0), unlist(treatment_20))$p.value) %>% 
+  select(Group, Analyte, p_val)
+
+df_scaled_means <-
+  df_scaled %>% 
+  filter(Treatment == '20') %>% 
+  group_by(Group, Treatment) %>% 
+  summarise_if(is.numeric, list(~mean(., na.rm = TRUE), ~stderr(., na.rm = TRUE)))
+
+
+df_scaled_wide <-
+  df_scaled_means %>% 
+  pivot_longer(cols = c(ends_with('mean'), ends_with('stderr')), 
+               names_to = c('.value', 'Type'),
+               names_pattern = '(.*)_(.*)') %>% 
+  pivot_longer(cols = c(-Group, -Type, -Treatment),
+               names_to = 'Analyte',
+               values_to = 'Value') %>% 
+  pivot_wider(names_from = 'Type', values_from = 'Value') 
+
+df_joined <- 
+  left_join(df_scaled_wide, df_scaled_sig)
+
+df_test <-
+  left_join(df_joined, df_stat_summary_treatment %>% select(dep, p) %>% rename(Analyte = dep)) %>% 
+  mutate(aestrik = case_when(
+    p_val <= alpha_corrected & p <= alpha_corrected ~ "*",
+    TRUE ~ ""
+  ))
+
+ggplot(df_test, height= 30) +
+  geom_bar(aes(x = Analyte, y=mean), stat='identity', fill = 'deepskyblue3') +
+  geom_errorbar(aes(x=Analyte, ymin = mean-stderr, ymax= mean + stderr), width= 0.2) +
+  geom_text(aes(x=Analyte, y = mean+stderr + 0.3, label=aestrik), size=5) +
+  facet_wrap(~Group, nrow = 3) +
+  geom_hline(yintercept = 2, linetype = 'dashed') +
+  theme_bw(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(y = "Normalized Fluorescence")
+
+ggsave("./Graphs/everthang.png", device='png', height = 6.5, width = 6.5)
+
+```
+
+
+
+
+
+
+

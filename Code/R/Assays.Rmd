@@ -1,0 +1,316 @@
+---
+title: "ASSays"
+output: html_document
+---
+```{r}
+games.howell <- function(grp, obs) {
+  
+  #Create combinations
+  combs <- combn(unique(grp), 2)
+  
+  # Statistics that will be used throughout the calculations:
+  # n = sample size of each group
+  # groups = number of groups in data
+  # Mean = means of each group sample
+  # std = variance of each group sample
+  n <- tapply(obs, grp, length)
+  groups <- length(tapply(obs, grp, length))
+  Mean <- tapply(obs, grp, mean)
+  std <- tapply(obs, grp, var)
+  
+  statistics <- lapply(1:ncol(combs), function(x) {
+    
+    mean.diff <- Mean[combs[2,x]] - Mean[combs[1,x]]
+    
+    #t-values
+    t <- abs(Mean[combs[1,x]] - Mean[combs[2,x]]) / sqrt((std[combs[1,x]] / n[combs[1,x]]) + (std[combs[2,x]] / n[combs[2,x]]))
+    
+    # Degrees of Freedom
+    df <- (std[combs[1,x]] / n[combs[1,x]] + std[combs[2,x]] / n[combs[2,x]])^2 / # Numerator Degrees of Freedom
+            ((std[combs[1,x]] / n[combs[1,x]])^2 / (n[combs[1,x]] - 1) + # Part 1 of Denominator Degrees of Freedom 
+              (std[combs[2,x]] / n[combs[2,x]])^2 / (n[combs[2,x]] - 1)) # Part 2 of Denominator Degrees of Freedom
+    
+    #p-values
+    p <- ptukey(t * sqrt(2), groups, df, lower.tail = FALSE)
+    
+    # Sigma standard error
+    se <- sqrt(0.5 * (std[combs[1,x]] / n[combs[1,x]] + std[combs[2,x]] / n[combs[2,x]]))
+          
+    # Upper Confidence Limit
+    upper.conf <- lapply(1:ncol(combs), function(x) {
+      mean.diff + qtukey(p = 0.95, nmeans = groups, df = df) * se
+    })[[1]]
+    
+    # Lower Confidence Limit
+    lower.conf <- lapply(1:ncol(combs), function(x) {
+      mean.diff - qtukey(p = 0.95, nmeans = groups, df = df) * se
+    })[[1]]
+    
+    # Group Combinations
+    grp.comb <- paste(combs[1,x], ':', combs[2,x])
+    
+    # Collect all statistics into list
+    stats <- list(grp.comb, mean.diff, se, t, df, p, upper.conf, lower.conf)
+  })
+  
+  # Unlist statistics collected earlier
+  stats.unlisted <- lapply(statistics, function(x) {
+    unlist(x)
+  })
+  
+  # Create dataframe from flattened list
+  results <- data.frame(matrix(unlist(stats.unlisted), nrow = length(stats.unlisted), byrow=TRUE))
+  
+  # Select columns set as factors that should be numeric and change with as.numeric
+  results[c(2, 3:ncol(results))] <- round(as.numeric(as.matrix(results[c(2, 3:ncol(results))])), digits = 3)
+  
+  # Rename data frame columns
+  colnames(results) <- c('groups', 'Mean Difference', 'Standard Error', 't', 'df', 'p', 'upper limit', 'lower limit')
+
+  return(results)
+}
+```
+
+
+```{r}
+library(tidyverse)
+library(rlang)
+
+assay <- "MTT"
+
+
+
+file <- paste("Raw Data", assay)
+file <- paste(file, ".CSV", sep="")
+df <- read.csv(file=file, check.names = FALSE)
+
+#Split the group column into group and treatment columns
+df_splt <- 
+  df %>% 
+  separate("Group", into=c("Group", "Treatment"), sep=" ") %>% 
+  mutate(Treatment = as.numeric(Treatment))
+
+n_treatments <- length(unique(df_splt$Treatment))
+
+groupDFs <- 
+  df_splt %>% 
+  split(.$Group)
+
+df_to_splt <- lapply(names(groupDFs), function(group){
+  n_obs <- 
+    groupDFs[[group]] %>% 
+    count(Treatment) 
+
+  n_obs <- n_obs$n[[1]]
+  if (group == "ENDO"){rep_each = 12} else {rep_each = 16}
+  scale_id <- c(rep(c(rep(seq_len(n_obs/rep_each), each=rep_each)), n_treatments))
+  
+  groupDFs[[group]] %>% 
+    mutate(scale_id = scale_id) %>% 
+    unite(splt_grp, Group, scale_id, sep="_")
+}) %>% bind_rows()
+
+groupDFs <- 
+  df_to_splt %>% 
+  split(.$splt_grp)
+
+df_scaled <-
+  lapply(names(groupDFs), function(group){
+    scale_mean <-
+      groupDFs[[group]] %>% 
+      filter(Treatment == 0) %>% 
+      select(!!as.name(assay)) %>% 
+      pull %>% 
+      mean
+    
+    groupDFs[[group]] %>% 
+      mutate( !!as.name(assay) := (!!as.name(assay) - scale_mean)/sd(!!as.name(assay)) + 4)
+  }) %>% 
+  bind_rows() %>% 
+  separate(splt_grp, into=c("Group", "scale_id"), sep="_") %>% 
+  select(-scale_id)
+
+# Values of the df scaled by plate by subtracting the mean from all the values, dividing by the standard deviation
+# of the values, and adding 3 (to avoid NaNs when log transforming the response)
+df_scaled <-
+  df_scaled %>%
+  mutate(Group = factor(Group, levels = c("ENDO", "MICRO", "HAPI", "MIXED.ENDO-MICRO", "MIXED.ENDO-HAPI"))) %>% 
+  arrange(Group)
+
+df_scaled_log_means <- 
+  df_scaled %>% 
+  mutate(!!as.name(assay) := log(!!as.name(assay))) %>% 
+  group_by(Group, Treatment) %>% 
+  summarise(mean = mean(!!as.name(assay)))
+  
+  
+# This dataframe contains the response and stderror averaged over each treatment for each group (for plotting bar graphs)
+df_means <- 
+  df_scaled %>%
+  group_by(Group, Treatment) %>% 
+  summarise(response_mean = mean(!!as.name(assay)), stderr = sd(!!as.name(assay)/sqrt(length(!!as.name(assay)))))
+
+
+```
+
+
+```{r}
+ggplot(data=df_scaled, mapping = aes(x=Treatment, y=log(!!as.name(assay)), color = Group)) +
+  geom_smooth(method='lm', se = FALSE) + 
+  geom_point() +
+  labs(x="UF-DEP Concentration (μg/ml)", y="Log Relative LDH Leakage (Absorbance)", color="Cell Group") +
+  scale_color_discrete(labels = c("Endo", "Micro", "HAPI", "Mixed EM", "Mixed EH")) +
+  theme_bw()
+
+```
+
+
+```{r}
+analyte <- assay
+analyte_err <- "stderr"
+y_err_max <- df_means$response_mean + df_means$stderr
+y_err_min <- df_means$response_mean - df_means$stderr
+max_height = max(y_err_max)
+unit <- max_height / 25
+bar_width = 0.5/3
+
+groups <- unique(df_means$Group)
+treatments <- unique(df_means$Treatment)
+
+plt <- 
+  ggplot(data = df_means, mapping = aes(y=response_mean, x=Group, fill=as.character(Treatment))) + 
+  geom_bar( position="dodge", stat="identity", width=0.5) + 
+  theme_bw(base_size = 13) +
+  geom_errorbar(aes(ymin=y_err_min, ymax=y_err_max), width=.2, position=position_dodge(.5)) + 
+  scale_x_discrete(label=c("Endo", "Micro", "HAPI", "Mixed EM", "Mixed EH")) + 
+  labs(x="", y="Relative LDH Leakage (Absorbance)", fill = "UF-DEP\nConcentration\n(μg/ml)")
+  
+if (compare_all_pairs){
+  for (i in 1:length(groups)){
+    group = groups[i]
+    df_group <- df_splt[df_splt$Group == group,]
+    howell_tst <- games.howell(as.character(df_group$Treatment), df_group[[assay]])
+    group_starting_x <- i - (length(treatments) * bar_width)/2
+    x_values = list()
+    y_offset <- 0
+    highest_treatment_in_group <- max(df_means[df_means$Group == group, analyte] + df_means[df_means$Group == group,analyte_err])
+    for (j in 1:(length(treatments) -1)){
+      treatment_1_height <- df_means[df_means$Group == group & df_means$Treatment == treatments[j],analyte] + df_means[df_means$Group == group & df_means$Treatment == treatments[j],analyte_err]
+      for (k in (j + 1):length(treatments)){
+        treatment_2_height <- df_means[df_means$Group == group & df_means$Treatment == treatments[k],analyte] + df_means[df_means$Group == group & df_means$Treatment == treatments[k],analyte_err]
+        max_treatment_height <- max(c(treatment_1_height, treatment_2_height))
+        x_values <- c(group_starting_x + j*bar_width - bar_width/2 + bar_width/10, group_starting_x + j*bar_width - bar_width/2 + bar_width/10, group_starting_x + k*bar_width - bar_width/2 - bar_width/10, group_starting_x + k*bar_width - bar_width/2 - bar_width/10)
+        if (k-j ==1) {
+          y_pos <- max_treatment_height + 2 * unit
+        } else {
+          y_pos <- highest_treatment_in_group + 2*unit*(j - 1 + k - 1)
+        }
+  
+        y_values <- c(y_pos-unit, y_pos, y_pos, y_pos-unit)
+        x_text <- (group_starting_x + j*bar_width - bar_width/2 + bar_width/10 + group_starting_x + k*bar_width - bar_width/2 - bar_width/10)/2
+        y_text <- y_pos + 0.75*unit
+        df_line <- data.frame(x=x_values,y=y_values, Treatment = rep(c('0'), 2))
+        treatments_conc <- paste(treatments[j], treatments[k], sep=" : ")
+        p_val <- howell_tst[howell_tst$groups == treatments_conc,'p']
+        if (p_val < 0.05){
+          lbl <- "*"
+        } else {
+          lbl <- "n.s."
+        }
+        plt <- plt + geom_line(data=df_line, aes(x=x,y=y)) + annotate("text", label=lbl, x=x_text, y=y_text, color="black", size=3)
+      }
+    }
+  }
+}
+
+
+annotate_x_pos <- c(1,2,3,4,5)
+annotate_y_pos <- 
+  df_means %>% 
+  group_by(Group) %>% 
+  summarise(y_pos = max(response_mean + stderr) + 2*unit) %>%  
+  select(y_pos) %>% 
+  pull
+
+annotate_txt <- c("a", "b", "c", "d", "e")
+for (i in 1:length(annotate_txt)){
+  plt <- plt + annotate("text", label=annotate_txt[i], x=annotate_x_pos[i], y=annotate_y_pos[i], size = 4.5, color="black")
+}
+print(plt)
+```
+
+```{r}
+library(rlang)
+library(tidyverse)
+library(stats)
+
+
+#Function to return the slope of a linear mode
+
+find_linear_slope <- function(x, y){
+  mdl <- lm(y~x)
+  coef(mdl)[2]
+}
+
+#Sample from the dataframe. Each dose sample is drawn at random with replacement a number of times equal to the number of data points at that dose (bootstrapped):
+sample_from_df <- function(df_assay, sampleSizes_int) {
+  samples_idx <- unlist(lapply(seq_along(sampleSizes_int), function(i){
+      sample(1:sampleSizes_int[i], replace = TRUE) + (sum(sampleSizes_int[1:i]) - sampleSizes_int[i])}))
+  df_boot <- df_assay[samples_idx,]
+  df_boot %>% 
+    group_by(Group) %>% 
+    summarise(Slope = find_linear_slope((Treatment), log(!!sym(assay))))
+}
+
+cell_types <- df %>% separate("Group", into=c("Group", "Dose"), sep=" ") %>% pull(Group) %>% unique()
+
+
+create_slopes_df <- function(data_frame){
+
+  sampleSizes_int <- 
+  data_frame %>% 
+  count(Group, Treatment) %>% 
+  pull(n)
+
+  result <- do.call(rbind, replicate(240, expr = sample_from_df(data_frame, sampleSizes_int), simplify = FALSE))
+  return(result)
+}
+
+df_slps <- create_slopes_df(df_scaled)
+df_slps_mean <- 
+  df_slps %>% 
+  group_by(Group) %>% 
+  summarise(stderr = sd(Slope)/sqrt(length(Slope)), Slope = mean(Slope))
+
+model <- aov(Slope~Group, data=df_slps)
+summary(model)
+require(broom)
+tidy(TukeyHSD(model, "Group"))
+
+
+```
+
+```{r}
+library(tidyverse)
+if (assay == "ROS"){
+  ytitle <- "Log Relative ROS (Fluorescence)"
+} else if (assay == "LDH") {
+  ytitle <- "Log Relative LDH Leakage (Absorbance)"
+} else if (assay == "MTT")
+  ytitle <- "Log Relative Cell Metabolic Activity (Absorbance)"
+
+
+plt <- ggplot(data=df_scaled, mapping = aes(x=Treatment, y=log(!!as.name(assay)))) +
+  geom_point(alpha=0) + 
+  geom_abline(data=df_slps_mean, aes(slope=Slope, color=Group, intercept=log(4)),  size=0.75) +
+  scale_x_continuous(limits=c(1,20)) + 
+  scale_y_continuous(limits=c(1,1.55)) +
+  labs(x="UF-DEP Concentration (μg/ml)", y=ytitle, color="Cell Group") +
+  scale_color_discrete(labels = c("Endo", "Micro", "HAPI", "Mixed EM", "Mixed EH")) +
+  theme_bw(base_size = 13)
+
+print(plt)
+
+```
+
+

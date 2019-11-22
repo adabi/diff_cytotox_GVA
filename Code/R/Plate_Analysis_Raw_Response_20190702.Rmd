@@ -1,0 +1,1154 @@
+---
+title: "Plate Analysis Response"
+author: "Gabriel J. Odom, PhD, ThD"
+date: "7/2/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+Grace called me on 29 April asking why her data wasn't normal and what methods can she use on this data. I asked her for the raw data to explore. I described to her the exploration and analysis in `Grace Aquino/Code/Plate_Analysis_20190430.R` on 2019-06-06.
+
+The data cleaning was handled in `Grace Aquino/Code/Plate_3x_Cleaning_20190606.R`. This report analyses the raw and scaled ROS, LDH, and MTT data, as they all share similar forms.
+
+```{r message=FALSE}
+library(tidyverse)
+
+# dataDir <- "../Data/clean2019/"
+# Interactive:
+dataDir <- "./Data/clean2019/"
+```
+
+
+
+# ROS
+##  Read and Inspect Clean Data
+```{r message=FALSE}
+rosPlate_df <- read_csv(paste0(dataDir, "ROS_x_DEP_exposure_20190606.csv"))
+str(rosPlate_df, give.attr = FALSE)
+```
+
+We are interested in the fluorescence.
+```{r}
+par(mfrow = c(1, 2))
+hist(rosPlate_df$fluorescence, main = "Fluorescence")
+hist(log(rosPlate_df$fluorescence), main = "Natural Log Fluorescence")
+par(mfrow = c(1, 1))
+```
+
+This is clearly bi-modal, but we'll see if the residuals are as well. The treatment may very well be the cause.
+
+
+## Recode Baseline
+There are 5 total groups: ENDO, ENDO + HAPI, HAPI, ENDO + MICRO, and MICRO. Let's make ENDO the baseline.
+```{r}
+rosPlate2_df <- 
+  rosPlate_df %>% 
+  mutate(only_HAPI  = (HAPI & !ENDO)) %>% 
+  mutate(only_MICRO = (MICRO & !ENDO)) %>% 
+  mutate(HAPI_ENDO  = (HAPI & ENDO)) %>% 
+  mutate(MICRO_ENDO = (MICRO & ENDO)) %>% 
+  select(-ENDO, -HAPI, -MICRO)
+```
+
+
+## Raw Data
+We first inspect the results for the raw fluorescence.
+
+### Basic Linear Model
+Fit the model and inspect the model fit.
+```{r}
+ros_mod <- lm(log(fluorescence) ~ ., data = rosPlate2_df)
+par(mfrow = c(2, 2))
+plot(ros_mod)
+par(mfrow = c(1, 1))
+```
+
+The diagnostic plots look quite reasonable. We now inspect the distribution of the residuals directly.
+
+```{r}
+hist(
+  residuals(ros_mod),
+  main = "Residuals of Simple Linear Model for Fluorescence"
+)
+```
+
+It appears to be symmetric and uni-modal, so our inference should be reasonable. Due to the sample size, problems with the residual distribution need to be quite egregious before inference is negatively impacted.
+
+Here is the model summary.
+```{r}
+summary(ros_mod)
+```
+
+The intercept has the ENDO effect. The control effects make sense, and we see a positive (but small) dose effect regardless of the cell type. Further, it appears that changing from ENDO to any other cell type---or even adding another cell type---decreases fluorescence. The worst offender is MICRO.
+
+
+### Plots
+Models are nice, but we should check to see if they make sense given the data.
+
+#### Wrangle the Data
+We re-code the cell types to make the figures look nicer.
+```{r}
+rosPlate3_df <- 
+  rosPlate_df %>%  
+  mutate(only_HAPI  = (HAPI & !ENDO)) %>% 
+  mutate(only_MICRO = (MICRO & !ENDO)) %>%
+  mutate(only_ENDO  = (ENDO & (!MICRO & !HAPI))) %>%  
+  mutate(HAPI_ENDO  = (HAPI & ENDO)) %>% 
+  mutate(MICRO_ENDO = (MICRO & ENDO)) %>% 
+  select(-MICRO, -HAPI, -ENDO) %>% 
+  gather(Type, toKeep, -negCTRL, -posCTRL, -dose_ug, -fluorescence) %>% 
+  filter(toKeep) %>%
+  select(-toKeep)
+str(rosPlate3_df, give.attr = FALSE)
+```
+
+We now have a column of the cell type, in addition to columns for the controls, dose, and fluorescence.
+
+#### Box Plots by Dose Factor and Cell Type
+```{r}
+rosPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!negCTRL) %>%
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = fluorescence) +
+    scale_y_log10() +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Log Fluorescence by Dose over Cell Type")
+```
+
+We see a small but consistent dose effect, which agrees with the linear model output. The dose effect is dwarfed by the effect of the cell type, however.
+
+#### Scatterplot by Dose and Cell Type
+The previous figure ignored the scale of the changing dose. We will correct that here.
+```{r}
+rosPlate3_df %>% 
+  filter(!negCTRL) %>% 
+  filter(!posCTRL) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = fluorescence, group = Type) +
+    scale_y_log10() +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    ggtitle("Log Fluorescence by Dose over Cell Type")
+```
+
+Positive dosage trends are apparent for all cell types.
+
+
+## Scaled and Normalized Data
+Grace also asked me to inspect the effect of multiplicative scaling and normalizing within cell types to the "blank control" (the fluorescence at dose = 0 without effects from positive or negative controls).
+
+### Transformation Processes
+The multiplicative scaling process is
+```
+for each cell type {
+
+  calculate the mean response at dose = 0 (ignoring al CTRLs); save as "mu"
+  
+  for each dose > 0 {
+    divide each response by mu
+  }
+  
+}
+```
+This will transform all response values to percent changes above or below the average of the cell-specific dose = 0 "blank control".
+
+The normalization process is similar:
+```
+for each cell type {
+
+  calculate the mean response at dose = 0 (ignoring al CTRLs); save as "mu"
+  calculate the standard deviation of response at dose = 0 (ignoring al CTRLs); save as "sigma"
+  
+  for each dose > 0 {
+    subract each response from mu then divide by sigma
+  }
+  
+}
+```
+This will transform all response values to $Z$-scores away from the average of the cell-specific dose = 0 "blank control".
+
+### Scaling the Data
+Here are the point summaries for the five cell types:
+```{r}
+rosBlankCTRL_df <- 
+  rosPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!negCTRL) %>% 
+  filter(dose_ug == 0) %>% 
+  group_by(Type) %>% 
+  summarise(
+    meanFLUO   = mean(fluorescence),
+    stdDevFLUO = sd(fluorescence)
+  ) %>% 
+  mutate(Type = as.character(Type))
+rosBlankCTRL_df
+```
+
+Now we use both procedures to "standardize" the data changes to be cell-type specific.
+```{r}
+rosActiveDFs_ls <- 
+  rosPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!negCTRL) %>% 
+  select(-posCTRL, -negCTRL) %>% 
+  split(., .$Type)
+
+rosTreat_df <- 
+  lapply(names(rosActiveDFs_ls), function(name){
+    
+    mu_num <- 
+      rosBlankCTRL_df %>% 
+      filter(Type == name) %>% 
+      select(meanFLUO) %>% 
+      pull
+    sigma_num <- 
+      rosBlankCTRL_df %>% 
+      filter(Type == name) %>% 
+      select(stdDevFLUO) %>% 
+      pull
+    rosActiveDFs_ls[[name]] %>% 
+      mutate(scaledFLUO = fluorescence / mu_num) %>% 
+      mutate(normFLUO = (fluorescence - mu_num) / sigma_num) %>% 
+      select(-fluorescence)
+    
+  }) %>% 
+  bind_rows()
+
+rosTreat_df
+```
+
+## Updated Linear Models
+
+### Model for Scaled Fluorescence
+Fit and inspect the model for the scaled fluorescence first. Because the `rosTreat_df` data has both transformation methods, we make sure to remove the other method.
+```{r}
+rosScale_mod <- lm(log(scaledFLUO) ~ . -normFLUO, data = rosTreat_df)
+par(mfrow = c(2, 2))
+plot(rosScale_mod)
+par(mfrow = c(1, 1))
+```
+This looks great.
+
+The model output is
+```{r}
+summary(rosScale_mod)
+```
+
+### Updated Plots and Interpretation for Cell-type Scaled Fluorescence
+We should also inspect plots, to ensure that our interpretation of this model output makes sense.
+
+#### Box Plots by Dose Factor and Cell Type for Scaled Fluorescence
+First we inspect boxplots holding the dose as a ordinal variable.
+```{r}
+rosTreat_df %>% 
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = scaledFLUO) +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Fluorescence / Average Fluorescence within Cell Type by Dose")
+```
+
+We see a small but consistent dose effect, which agrees with the linear model output. 
+
+#### Scatterplot by Dose and Cell Type for Scaled Fluorescence
+Now we adjust for the magnitude of the dose changes.
+```{r}
+
+rosTreat_df %>%
+  mutate(Type = factor(Type, levels=c("only_ENDO", "only_MICRO", "only_HAPI", "MICRO_ENDO", "HAPI_ENDO"))) %>% 
+  arrange(Type) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = scaledFLUO, group = Type) +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    labs(x="UF-DEP Concentrations (μg/ml)", y="Relative ROS Production", color="Cell Group") +
+    scale_color_hue(labels=c("Endo", "Micro", "HAPI", "Mixed EM", "Mixed EH")) + 
+    theme_bw(base_size = 13)
+
+```
+
+Positive dosage trends appear for all cell types, but are much stronger for the ENDO and ENDO + HAPI cells. This agrees with our model output completely.
+
+
+
+
+### Model for Normalized Fluorescence
+Now we fit and inspect the model for the normalized fluorescence.
+```{r}
+rosNormed_mod <- lm(normFLUO ~ . -scaledFLUO, data = rosTreat_df)
+par(mfrow = c(2, 2))
+plot(rosNormed_mod)
+par(mfrow = c(1, 1))
+```
+This is more of a mess. We need to take a closer look at the residuals.
+```{r}
+hist(residuals(rosNormed_mod))
+```
+
+We probably need to transform the $Z$-scores, but then we lose interpretability (a square-root transform of the shifted $Z$-scores would be a natural fit).
+
+### Updated Plots and Interpretation for Cell-type Normalized Fluorescence
+We should inspect plots first, to ensure that our model output makes sense. Then we can interpret it.
+
+#### Box Plots by Dose Factor and Cell Type for Normalized Fluorescence
+```{r}
+rosTreat_df %>% 
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = normFLUO) +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Normalized Fluorescence within Cell Type by Dose")
+```
+
+We see a much more pronounced dose effect for ENDO and MICRO + ENDO. 
+
+#### Scatterplot by Dose and Cell Type for Normalized Fluorescence
+```{r}
+rosTreat_df %>%
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = normFLUO, group = Type) +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    ggtitle("Normalized Fluorescence within Cell Type by Dose")
+```
+
+Positive dosage trends appear for all cell types, but are much stronger for the ENDO and ENDO + MICRO cells. 
+
+The model output is
+```{r}
+summary(rosNormed_mod)
+```
+We note that the $p$-values have dropped considerably for MICRO, ENDO, and ENDO + MICRO. Also, the adjusted $R^2$ value increased from 0.19 to 0.33. The distribution of the residuals may still be a problem. Overall, note that the adjusted $R^2$ dropped from 0.93 when we centred on the cell types. Thus, the strong majority signal in the data is due to the cell type.
+
+
+## ROS Update 2019-08-05
+Now that we have shown a dose effect, Grace wants to know how the cells interact with treatment. I tried a random-coefficient linear mixed model, but it failed to converge. My solution (not completely sure it's correct) is to replace dose with treated v untreated and include an interaction.
+
+We first clean out the positive and negative controls, and then add a treatment label.
+```{r ROS_discDose}
+rosDiscDose_df <- 
+  rosTreat_df %>% 
+  mutate(only_HAPI = Type == "only_HAPI") %>% 
+  mutate(only_MICRO = Type == "only_MICRO") %>% 
+  mutate(HAPI_ENDO = Type == "HAPI_ENDO") %>% 
+  mutate(MICRO_ENDO = Type == "MICRO_ENDO") %>% 
+  mutate(treated = dose_ug != 0) %>% 
+  select(-Type, -dose_ug)
+```
+
+### Scaled ROS
+Now we fit a linear model with the treatment indicator and an interaction between treatment and cell type to the scaled fluorescence. Recall that this data has had the cell type effect removed due to the scaling effect, so we do not include the cell types in the model.
+```{r ROS_fitTreatInteract}
+rosTreatScaled_mod <- lm(
+  scaledFLUO ~ 
+    treated +
+    treated:only_HAPI +
+    treated:only_MICRO +
+    treated:HAPI_ENDO + 
+    treated:MICRO_ENDO -
+    normFLUO
+  ,
+  data = rosDiscDose_df
+)
+```
+
+We check the fit diagnostics.
+```{r}
+par(mfrow = c(2, 2))
+plot(rosTreatScaled_mod)
+par(mfrow = c(1, 1))
+```
+
+Now for the interactions with dose:
+```{r}
+summary(rosTreatScaled_mod)
+```
+
+We see that there is a treatment effect, as we saw previously, and as is shown in the "Fluorescence / Average Fluorescence within Cell Type by Dose" figure. Further, we see that HAPI, MICRO, and HAPI + ENDO have significant protective effects for dose when compared to the baseline of ENDO alone. Treatment on MICRO + ENDO cells have similar behaviour to treatment on ENDO cells alone.
+
+
+### Normalized ROS
+Now we fit a linear model with the treatment indicator and an interaction between treatment and cell type to the normalized fluorescence. Recall that this data has had the cell type effect removed due to the normalization, so we do not include the cell types in the model.
+```{r ROS_fitTreatInteract2}
+rosTreatNorm_mod <- lm(
+  normFLUO ~ 
+    treated +
+    treated:only_HAPI +
+    treated:only_MICRO +
+    treated:HAPI_ENDO + 
+    treated:MICRO_ENDO -
+    scaledFLUO
+  ,
+  data = rosDiscDose_df
+)
+```
+
+We check the fit diagnostics.
+```{r}
+par(mfrow = c(2, 2))
+plot(rosTreatNorm_mod)
+par(mfrow = c(1, 1))
+```
+
+Now for the interactions with dose:
+```{r}
+summary(rosTreatNorm_mod)
+```
+
+We see that there is a treatment effect, as we saw previously, and as is shown in the "Normalized Fluorescence within Cell Type by Dose" figure. Further, we see that HAPI, MICRO, and HAPI + ENDO have significant protective effects for dose when compared to the baseline of ENDO alone. Treatment on MICRO + ENDO cells have amplified normalized fluorescence when compared with treatment on ENDO cells alone.
+
+
+
+
+# LDH
+##  Read and Inspect Clean Data
+```{r message=FALSE}
+ldhPlate_df <- read_csv(paste0(dataDir, "LDH_x_DEP_exposure_20190606.csv"))
+str(ldhPlate_df, give.attr = FALSE)
+```
+
+We are interested in the absorbance.
+```{r}
+par(mfrow = c(1, 2))
+hist(ldhPlate_df$absorbance, main = "Absorbance")
+hist(log(ldhPlate_df$absorbance), main = "Natural Log Absorbance")
+par(mfrow = c(1, 1))
+```
+
+This is clearly bi-modal, but we'll see if the residuals are as well. The treatment may very well be the cause.
+
+
+## Recode Baseline
+There are 5 total groups: ENDO, ENDO + HAPI, HAPI, ENDO + MICRO, and MICRO. Let's make ENDO the baseline.
+```{r}
+ldhPlate2_df <- 
+  ldhPlate_df %>% 
+  mutate(only_HAPI  = (HAPI & !ENDO)) %>% 
+  mutate(only_MICRO = (MICRO & !ENDO)) %>% 
+  mutate(HAPI_ENDO  = (HAPI & ENDO)) %>% 
+  mutate(MICRO_ENDO = (MICRO & ENDO)) %>% 
+  select(-ENDO, -HAPI, -MICRO)
+```
+
+
+## Raw Data
+We first inspect the results for the raw absorbance.
+
+### Basic Linear Model
+Fit the model and inspect the model fit.
+```{r}
+ldh_mod <- lm(log(absorbance) ~ ., data = ldhPlate2_df)
+par(mfrow = c(2, 2))
+plot(ldh_mod)
+par(mfrow = c(1, 1))
+```
+
+The diagnostic plots look quite reasonable, except for the Q-Q plot of the residuals. We now inspect the distribution of the residuals directly when compared to random normal deviates of the same variance.
+
+```{r}
+par(mfrow = c(2, 1))
+hist(
+  rnorm(nrow(ldhPlate2_df), sd = sd(residuals(ldh_mod))),
+  xlim = c(-1, 1),
+  main = "Random Normal Density to Match Variance of LDH Model Residuals"
+)
+hist(residuals(ldh_mod), xlim = c(-1, 1), main = "LDH Model Residuals")
+par(mfrow = c(1, 1))
+```
+
+It appears to be symmetric and uni-modal, so our inference should be reasonable. However, the kurtosis of the model residuals is off. We should exercise caution.
+
+Here is the model summary.
+```{r}
+summary(ldh_mod)
+```
+
+The intercept has the ENDO effect. I think the control effects make sense, but I'm not sure if I'm interpreting LPS correctly. We see a positive (but small) dose effect regardless of the cell type. Further, it appears that changing from ENDO to MICRO decreases response.
+
+
+### Plots
+Models are nice, but we should check to see if they make sense given the data.
+
+#### Wrangle the Data
+We re-code the cell types to make the figures look nicer.
+```{r}
+ldhPlate3_df <- 
+  ldhPlate_df %>%  
+  mutate(only_HAPI  = (HAPI & !ENDO)) %>% 
+  mutate(only_MICRO = (MICRO & !ENDO)) %>%
+  mutate(only_ENDO  = (ENDO & (!MICRO & !HAPI))) %>%  
+  mutate(HAPI_ENDO  = (HAPI & ENDO)) %>% 
+  mutate(MICRO_ENDO = (MICRO & ENDO)) %>% 
+  select(-MICRO, -HAPI, -ENDO) %>% 
+  gather(Type, toKeep, -LPS, -posCTRL, -dose_ug, -absorbance) %>% 
+  filter(toKeep) %>%
+  select(-toKeep) %>% 
+  mutate(Type = factor(Type))
+
+ldhPlate3_df
+```
+
+We now have a column of the cell type, in addition to columns for the controls, dose, and absorbance.
+
+#### Box Plots by Dose Factor and Cell Type
+```{r}
+ldhPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!LPS) %>%
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = absorbance) +
+    scale_y_log10() +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Log Absorbance by Dose over Cell Type")
+```
+
+We see a small dose effect for all three ENDO cell types
+
+#### Scatterplot by Dose and Cell Type
+The previous figure ignored the scale of the changing dose. We will correct that here.
+```{r}
+ldhPlate3_df %>% 
+  filter(!LPS) %>% 
+  filter(!posCTRL) %>% 
+  ggplot() +
+  aes(x = dose_ug, y = absorbance, group = Type) +
+  scale_y_log10() +
+  geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+  stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+  ggtitle("Log absorbance by Dose over Cell Type")
+```
+
+As mentioned previously, the dose effect is small, positive, significant, and is expressed across the three cell types that included ENDO. HAPI alone may exhibit a negative effect to the dose, which may be why the dose effect in the linear model is so small. Let's include the interaction.
+```{r}
+ldhHAPIinteract_mod <- lm(
+  log(absorbance) ~ . + only_HAPI:dose_ug,
+  data = ldhPlate2_df
+)
+summary(ldhHAPIinteract_mod)
+```
+This interaction is significant and negative.
+
+
+## Scaled and Normalized Data
+### Scaling the Data
+Here are the point summaries for the five cell types:
+```{r}
+ldhBlankCTRL_df <- 
+  ldhPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!LPS) %>% 
+  filter(dose_ug == 0) %>% 
+  group_by(Type) %>% 
+  summarise(
+    meanABSORB   = mean(absorbance),
+    stdDevABSORB = sd(absorbance)
+  ) %>% 
+  mutate(Type = as.character(Type))
+ldhBlankCTRL_df
+```
+
+Now we use both procedures to "standardize" the data changes to be cell-type specific.
+```{r}
+ldhActiveDFs_ls <- 
+  ldhPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!LPS) %>% 
+  select(-posCTRL, -LPS) %>% 
+  split(., .$Type)
+
+ldhTreat_df <- 
+  lapply(names(ldhActiveDFs_ls), function(name){
+    
+    mu_num <- 
+      ldhBlankCTRL_df %>% 
+      filter(Type == name) %>% 
+      select(meanABSORB) %>% 
+      pull
+    sigma_num <- 
+      ldhBlankCTRL_df %>% 
+      filter(Type == name) %>% 
+      select(stdDevABSORB) %>% 
+      pull
+    ldhActiveDFs_ls[[name]] %>% 
+      mutate(scaledABSORB = absorbance / mu_num) %>% 
+      mutate(normABSORB = (absorbance - mu_num) / sigma_num) %>% 
+      select(-absorbance)
+    
+  }) %>% 
+  bind_rows()
+
+ldhTreat_df
+```
+
+## Updated Linear Models
+
+### Model for Scaled Absorbance
+Fit and inspect the model for the scaled absorbance first. Because the `ldhTreat_df` data has both transformation methods, we make sure to remove the other method.
+```{r}
+ldhScale_mod <- lm(log(scaledABSORB) ~ . -normABSORB, data = ldhTreat_df)
+par(mfrow = c(2, 2))
+plot(ldhScale_mod)
+par(mfrow = c(1, 1))
+```
+This is not great. We have problems in the tails again.
+
+```{r}
+par(mfrow = c(2, 1))
+hist(
+  rnorm(nrow(ldhTreat_df), sd = sd(residuals(ldhScale_mod))),
+  xlim = c(-1, 1),
+  main = "Random Normal Density to Match Variance of LDH Model Residuals"
+)
+hist(residuals(ldhScale_mod), xlim = c(-1, 1), main = "LDH Model Residuals")
+par(mfrow = c(1, 1))
+```
+Once again, we are overestimating the density near 0, a problem with the kurtosis of the residuals.
+
+The model output is
+```{r}
+summary(ldhScale_mod)
+```
+Note that the baseline here is HAPI + ENDO for some stupid reason.
+
+### Updated Plots and Interpretation for Cell-type Scaled Absorbance
+We should also inspect plots, to ensure that our interpretation of this model output makes sense.
+
+#### Box Plots by Dose Factor and Cell Type for Scaled Absorbance
+First we inspect boxplots holding the dose as a ordinal variable.
+```{r}
+ldhTreat_df %>% 
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = scaledABSORB) +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Absorbance / Average Absorbance within Cell Type by Dose")
+```
+
+We see a consistent dose effect for the three ENDO types, which agrees with the linear model output (recall that HAPI + ENDO is the baseline here). 
+
+#### Scatterplot by Dose and Cell Type for Scaled Absorbance
+Now we adjust for the magnitude of the dose changes.
+```{r}
+ldhTreat_df %>%
+  mutate(Type = factor(Type, levels=c("only_ENDO", "only_MICRO", "only_HAPI", "MICRO_ENDO", "HAPI_ENDO"))) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = scaledABSORB, group = Type) +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    labs(x="UF-DEP Concentrations (μg/ml)", y="Relative LDH Leakage", color="Cell Group") +
+    scale_color_hue(labels=c("Endo", "Micro", "HAPI", "Mixed EM", "Mixed EH")) + theme_bw(base_size = 13)
+```
+
+
+Positive dosage trends appear for the ENDO, ENDO + HAPI, and ENDO + MICRO cells. The MICRO alone cells have a negative dose effect. This agrees with our model output completely.
+
+
+
+
+### Model for Normalized Absorbance
+Now we fit and inspect the model for the normalized absorbance.
+```{r}
+ldhNormed_mod <- lm(normABSORB ~ . -scaledABSORB, data = ldhTreat_df)
+par(mfrow = c(2, 2))
+plot(ldhNormed_mod)
+par(mfrow = c(1, 1))
+```
+The residuals honestly aren't as bad here. There are a few observations that are dragging the tail out though.
+```{r}
+hist(residuals(ldhNormed_mod))
+```
+
+The model output is
+```{r}
+summary(ldhNormed_mod)
+```
+We note that the $p$-values have dropped considerably for ENDO and ENDO + MICRO. Also, the adjusted $R^2$ value increased from 0.19 to 0.32. The distribution of the residuals may still be a problem. Overall, note that the adjusted $R^2$ dropped from 0.88 when we centred on the cell types. Thus, the strong majority signal in the data is due to the cell type.
+
+### Updated Plots and Interpretation for Cell-type Normalized Absorbance
+We should inspect plots first, to ensure that our model output makes sense. Then we can interpret it.
+
+#### Box Plots by Dose Factor and Cell Type for Normalized Absorbance
+```{r}
+ldhTreat_df %>% 
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = normABSORB) +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Normalized Absorbance within Cell Type by Dose")
+```
+
+We see a dose effect for all cell types other than HAPI, and a much more pronounced dose effect for ENDO and MICRO + ENDO. 
+
+#### Scatterplot by Dose and Cell Type for Normalized Absorbance
+```{r}
+ldhTreat_df %>%
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = normABSORB, group = Type) +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    ggtitle("Normalized Absorbance within Cell Type by Dose")
+```
+
+Positive dosage trends appear for all cell types except for HAPI. 
+
+
+## LDH Update 2019-08-13
+Now that we have shown a dose effect, Grace wants to know how the cells interact with treatment. I tried a random-coefficient linear mixed model, but it failed to converge. My solution (not completely sure it's correct) is to replace dose with treated v untreated and include an interaction.
+
+We first clean out the positive and negative controls, and then add a treatment label.
+```{r LDH_discDose}
+ldhDiscDose_df <- 
+  ldhTreat_df %>% 
+  mutate(only_HAPI = Type == "only_HAPI") %>% 
+  mutate(only_MICRO = Type == "only_MICRO") %>% 
+  mutate(HAPI_ENDO = Type == "HAPI_ENDO") %>% 
+  mutate(MICRO_ENDO = Type == "MICRO_ENDO") %>% 
+  mutate(treated = dose_ug != 0) %>% 
+  select(-Type, -dose_ug)
+```
+
+### Scaled LDH
+Now we fit a linear model with the treatment indicator and an interaction between treatment and cell type to the scaled fluorescence. Recall that this data has had the cell type effect removed due to the scaling effect, so we do not include the cell types in the model.
+```{r LDH_fitTreatInteract}
+ldhTreatScaled_mod <- lm(
+  scaledABSORB ~ 
+    treated +
+    treated:only_HAPI +
+    treated:only_MICRO +
+    treated:HAPI_ENDO + 
+    treated:MICRO_ENDO -
+    normABSORB
+  ,
+  data = ldhDiscDose_df
+)
+```
+
+We check the fit diagnostics.
+```{r}
+par(mfrow = c(2, 2))
+plot(ldhTreatScaled_mod)
+par(mfrow = c(1, 1))
+```
+
+Now for the interactions with dose:
+```{r}
+summary(ldhTreatScaled_mod)
+```
+
+We see that there is a treatment effect, as we saw previously, and as is shown in the "Absorbance / Average Absorbance within Cell Type by Dose" figure. Further, we see that ENDO and MICRO + ENDO are not significantly different from the baseline (HAPI + ENDO). However, HAPI alone and MICRO alone are significantly different from the other three cell types, and their scaled treatment effect is negative (but probably flat for HAPI).
+
+
+### Normalized LDH
+Now we fit a linear model with the treatment indicator and an interaction between treatment and cell type to the normalized fluorescence. Recall that this data has had the cell type effect removed due to the normalization, so we do not include the cell types in the model.
+```{r LDH_fitTreatInteract2}
+ldhTreatNorm_mod <- lm(
+  normABSORB ~ 
+    treated +
+    treated:only_HAPI +
+    treated:only_MICRO +
+    treated:HAPI_ENDO + 
+    treated:MICRO_ENDO -
+    scaledABSORB
+  ,
+  data = ldhDiscDose_df
+)
+```
+
+We check the fit diagnostics.
+```{r}
+par(mfrow = c(2, 2))
+plot(ldhTreatNorm_mod)
+par(mfrow = c(1, 1))
+```
+
+Now for the interactions with dose:
+```{r}
+summary(ldhTreatNorm_mod)
+```
+
+We see that there is a treatment effect, as we saw previously, and as is shown in the "Normalized Absorbance within Cell Type by Dose" figure. Further, noting that ENDO is the baseline for this model, we see that HAPI, MICRO, HAPI + ENDO, and MICRO + ENDO all have significant protective effects for dose.
+
+
+
+
+# MTT
+##  Read and Inspect Clean Data
+```{r message=FALSE}
+mttPlate_df <- read_csv(paste0(dataDir, "MTT_x_DEP_exposure_20190606.csv"))
+str(mttPlate_df, give.attr = FALSE)
+```
+
+We are interested in the absorbance.
+```{r}
+hist(mttPlate_df$absorbance, main = "Absorbance")
+```
+
+This is clearly bi-modal, but we'll see if the residuals are as well. The treatment may very well be the cause.
+
+
+## Recode Baseline
+There are 5 total groups: ENDO, ENDO + HAPI, HAPI, ENDO + MICRO, and MICRO. Let's make ENDO the baseline.
+```{r}
+mttPlate2_df <- 
+  mttPlate_df %>% 
+  mutate(only_HAPI  = (HAPI & !ENDO)) %>% 
+  mutate(only_MICRO = (MICRO & !ENDO)) %>% 
+  mutate(HAPI_ENDO  = (HAPI & ENDO)) %>% 
+  mutate(MICRO_ENDO = (MICRO & ENDO)) %>% 
+  select(-ENDO, -HAPI, -MICRO)
+```
+
+
+## Raw Data
+We first inspect the results for the raw absorbance.
+
+### Basic Linear Model
+Fit the model and inspect the model fit.
+```{r}
+mtt_mod <- lm(absorbance ~ ., data = mttPlate2_df)
+par(mfrow = c(2, 2))
+plot(mtt_mod)
+par(mfrow = c(1, 1))
+```
+
+The diagnostic plots look quite reasonable.
+
+Here is the model summary.
+```{r}
+summary(mtt_mod)
+```
+
+The intercept has the ENDO effect. The control effects don't make sense, and we see a negative (but insignificant) dose effect. This metric requires additional inspection.
+
+
+### Plots
+Does our model make sense given the data?
+
+#### Wrangle the Data
+We re-code the cell types to make the figures look nicer.
+```{r}
+mttPlate3_df <- 
+  mttPlate_df %>%  
+  mutate(only_HAPI  = (HAPI & !ENDO)) %>% 
+  mutate(only_MICRO = (MICRO & !ENDO)) %>%
+  mutate(only_ENDO  = (ENDO & (!MICRO & !HAPI))) %>%  
+  mutate(HAPI_ENDO  = (HAPI & ENDO)) %>% 
+  mutate(MICRO_ENDO = (MICRO & ENDO)) %>% 
+  select(-MICRO, -HAPI, -ENDO) %>% 
+  gather(Type, toKeep, -LPS, -posCTRL, -dose_ug, -absorbance) %>% 
+  filter(toKeep) %>%
+  select(-toKeep) %>% 
+  mutate(Type = factor(Type))
+mttPlate3_df
+```
+
+#### Box Plots by Dose Factor and Cell Type
+```{r}
+mttPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!LPS) %>%
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = absorbance) +
+    scale_y_log10() +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Log Absorbance by Dose over Cell Type")
+```
+
+We see a small negative dose effect for ENDO + HAPI (and perhaps ENDO?). Technically, the dose effect isn't significant at 0.05, so this isn't real. Moreover, there may be confounding effects due to cell type. For this metric in particular, scaling or centering within cell type will be valuable.
+
+#### Scatterplot by Dose and Cell Type
+The previous figure ignored the scale of the changing dose. We will correct that here.
+```{r}
+mttPlate3_df %>% 
+  filter(!LPS) %>% 
+  filter(!posCTRL) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = absorbance, group = Type) +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    ggtitle("Log absorbance by Dose over Cell Type")
+```
+
+It looks like the potential negative effect to dose is driven entirely by the ENDO + HAPI group. Let's include this interaction.
+```{r}
+mttHAPIinteract_mod <- lm(
+  log(absorbance) ~ . + HAPI_ENDO:dose_ug,
+  data = mttPlate2_df
+)
+summary(mttHAPIinteract_mod)
+```
+The interaction is not significant, but it does remove any potentially negative dose effect.
+
+
+
+## Scaled and Normalized Data
+### Scaling the Data
+Here are the point summaries for the five cell types:
+```{r}
+mttBlankCTRL_df <- 
+  mttPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!LPS) %>% 
+  filter(dose_ug == 0) %>% 
+  group_by(Type) %>% 
+  summarise(
+    meanABSORB   = mean(absorbance),
+    stdDevABSORB = sd(absorbance)
+  ) %>% 
+  mutate(Type = as.character(Type))
+mttBlankCTRL_df
+```
+
+Now we use both procedures to "standardize" the data changes to be cell-type specific.
+```{r}
+mttActiveDFs_ls <- 
+  mttPlate3_df %>% 
+  filter(!posCTRL) %>% 
+  filter(!LPS) %>% 
+  select(-posCTRL, -LPS) %>% 
+  split(., .$Type)
+
+mttTreat_df <- 
+  lapply(names(mttActiveDFs_ls), function(name){
+    
+    mu_num <- 
+      mttBlankCTRL_df %>% 
+      filter(Type == name) %>% 
+      select(meanABSORB) %>% 
+      pull
+    sigma_num <- 
+      mttBlankCTRL_df %>% 
+      filter(Type == name) %>% 
+      select(stdDevABSORB) %>% 
+      pull
+    mttActiveDFs_ls[[name]] %>% 
+      mutate(scaledABSORB = absorbance / mu_num) %>% 
+      mutate(normABSORB = (absorbance - mu_num) / sigma_num) %>% 
+      select(-absorbance)
+    
+  }) %>% 
+  bind_rows()
+
+mttTreat_df
+```
+
+## Updated Linear Models
+
+### Model for Scaled Absorbance
+Fit and inspect the model for the scaled absorbance first. Because the `mttTreat_df` data has both transformation methods, we make sure to remove the other method.
+```{r}
+mttScale_mod <- lm(scaledABSORB ~ . -normABSORB, data = mttTreat_df)
+par(mfrow = c(2, 2))
+plot(mttScale_mod)
+par(mfrow = c(1, 1))
+```
+This looks terrible.
+```{r}
+hist(residuals(mttScale_mod))
+```
+But the residuals are symmetric and uni-modal. I guess we interpret this model with a grain of salt as well.
+
+The model output is
+```{r}
+summary(mttScale_mod)
+```
+Dose has the opposite effect it should, but it is thankfully not significant at $\alpha = 0.05$.
+
+### Updated Plots and Interpretation for Cell-type Scaled Absorbance
+We should also inspect plots, to ensure that our interpretation of this model output makes sense.
+
+#### Box Plots by Dose Factor and Cell Type for Scaled Absorbance
+First we inspect boxplots holding the dose as a ordinal variable.
+```{r}
+mttTreat_df %>% 
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = scaledABSORB) +
+    geom_boxplot(aes(fill = Type)) +
+    ggtitle("Absorbance / Average Absorbance within Cell Type by Dose")
+```
+
+There might be a negative dose effect for ENDO alone and ENDO + HAPI, but that's it (and it's not terribly strong anyway).
+
+#### Scatterplot by Dose and Cell Type for Scaled Absorbance
+Now we adjust for the magnitude of the dose changes.
+```{r}
+mttTreat_df %>%
+  mutate(Type = factor(Type, levels=c("only_ENDO", "only_MICRO", "only_HAPI", "MICRO_ENDO", "HAPI_ENDO"))) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = scaledABSORB, group = Type) +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    labs(x="UF-DEP Concentrations (μg/ml)", y="Relative Cell Metabolic Activity", color="Cell Group") +
+    scale_color_hue(labels=c("Endo", "Micro", "HAPI", "Mixed EM", "Mixed EH")) + theme_bw(base_size=13)
+```
+
+As before, there might be a negative dose effect for the ENDO-type cells, but it's weak. There might be a positive dose effect for ENDO + MICRO. Basically, the dose effect isn't doing anything here.
+
+
+
+
+### Model for Normalized Absorbance
+Now we fit and inspect the model for the normalized absorbance.
+```{r}
+mttNormed_mod <- lm(normABSORB ~ . -scaledABSORB, data = mttTreat_df)
+par(mfrow = c(2, 2))
+plot(mttNormed_mod)
+par(mfrow = c(1, 1))
+```
+This looks much nicer!
+
+### Updated Plots and Interpretation for Cell-type Normalized Absorbance
+We should inspect plots first, to ensure that our model output makes sense. Then we can interpret it.
+
+#### Box Plots by Dose Factor and Cell Type for Normalized Absorbance
+```{r warning=FALSE}
+mttTreat_df %>% 
+  mutate(
+    dose_ug = as.factor(dose_ug)
+  ) %>% 
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = normABSORB) +
+    geom_boxplot(aes(fill = Type)) +
+    scale_y_continuous(limits = c(-4, 4)) +
+    ggtitle("Normalized Absorbance within Cell Type by Dose")
+```
+
+There might be a small negative effect for ENDO and ENDO + HAPI, but look at the scale: they barely break $Z$ < -2.
+
+#### Scatterplot by Dose and Cell Type for Normalized Absorbance
+```{r warning=FALSE}
+mttTreat_df %>%
+  mutate(Type = factor(Type)) %>% 
+  ggplot() +
+    aes(x = dose_ug, y = normABSORB, group = Type) +
+    geom_jitter(aes(color = Type), width = 0.1, alpha = 0.5) +
+    stat_smooth(aes(color = Type), method = "lm", se = FALSE) +
+    scale_y_continuous(limits = c(-4, 4)) + 
+    ggtitle("Normalized Absorbance within Cell Type by Dose")
+```
+
+Once again, there might be a negative dose effect for ENDO + HAPI, but it's probably just noise. 
+
+The model output is
+```{r}
+summary(mttNormed_mod)
+```
+Everything is signficant, but the $R^2$ is 0.11. There's nothing here.
+
+
+## MTT Update 2019-08-13
+Now that we have shown a dose effect, Grace wants to know how the cells interact with treatment. I tried a random-coefficient linear mixed model, but it failed to converge. My solution (not completely sure it's correct) is to replace dose with treated v untreated and include an interaction.
+
+We first clean out the positive and negative controls, and then add a treatment label.
+```{r MTT_discDose}
+mttDiscDose_df <- 
+  mttTreat_df %>% 
+  mutate(only_HAPI = Type == "only_HAPI") %>% 
+  mutate(only_MICRO = Type == "only_MICRO") %>% 
+  mutate(HAPI_ENDO = Type == "HAPI_ENDO") %>% 
+  mutate(MICRO_ENDO = Type == "MICRO_ENDO") %>% 
+  mutate(treated = dose_ug != 0) %>% 
+  select(-Type, -dose_ug)
+```
+
+### Scaled MTT
+Now we fit a linear model with the treatment indicator and an interaction between treatment and cell type to the scaled fluorescence. Recall that this data has had the cell type effect removed due to the scaling effect, so we do not include the cell types in the model.
+```{r MTT_fitTreatInteract}
+mttTreatScaled_mod <- lm(
+  scaledABSORB ~ 
+    treated +
+    treated:only_HAPI +
+    treated:only_MICRO +
+    treated:HAPI_ENDO + 
+    treated:MICRO_ENDO -
+    normABSORB
+  ,
+  data = mttDiscDose_df
+)
+```
+
+We check the fit diagnostics.
+```{r}
+par(mfrow = c(2, 2))
+plot(mttTreatScaled_mod)
+par(mfrow = c(1, 1))
+```
+Ugh, that Q-Q plot looks awful...
+
+Now for the interactions with dose:
+```{r}
+summary(mttTreatScaled_mod)
+```
+
+We see that the treatment effect is now significant and negative, which is potentially worrisome. This relationship we saw previously, and as shown in the HAPI + ENDO and ENDO lines of the "Absorbance / Average Absorbance within Cell Type by Dose" figure. Further, we see that HAPI, MICRO, and MICRO + ENDO have no dose effect when compared to the baseline of ENDO alone. 
+
+
+### Normalized MTT
+Now we fit a linear model with the treatment indicator and an interaction between treatment and cell type to the normalized fluorescence. Recall that this data has had the cell type effect removed due to the normalization, so we do not include the cell types in the model.
+```{r MTT_fitTreatInteract2}
+mttTreatNorm_mod <- lm(
+  normABSORB ~ 
+    treated +
+    treated:only_HAPI +
+    treated:only_MICRO +
+    treated:HAPI_ENDO + 
+    treated:MICRO_ENDO -
+    scaledABSORB
+  ,
+  data = mttDiscDose_df
+)
+```
+
+We check the fit diagnostics.
+```{r}
+par(mfrow = c(2, 2))
+plot(mttTreatNorm_mod)
+par(mfrow = c(1, 1))
+```
+These aren't awful.
+
+Now for the interactions with dose:
+```{r}
+summary(mttTreatNorm_mod)
+```
+
+We see that the treatment effect is now significant and negative, as is shown in the "Normalized Absorbance within Cell Type by Dose" figure. Further, we see that HAPI + ENDO has significant protective effects for dose when compared to the baseline of ENDO alone. Treatment on MICRO and MICRO + ENDO cells have amplified normalized absorbance when compared with treatment on ENDO cells alone. Furthermore, while HAPI cells alone do not respond to treatment, they also do not have a significant dose interaction (despite what is shown in the figure--the blue line has a radically different slope than the slope for ENDO).
+
+
