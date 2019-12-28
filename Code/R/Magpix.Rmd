@@ -67,7 +67,7 @@ roundDown <- function(x) {
   return(result)
 }
 
-df <- read.csv(file="Full Raw Data Alternative.csv", check.names = FALSE)
+df <- read.csv(file="../../Data/Raw/Full Raw Data Alternative.csv", check.names = FALSE)
 
 
 
@@ -77,7 +77,8 @@ df <-
          'MIP-1\u03B1' = 'MIP-1a',
          'TNF-\u03B1' = 'TNF-a',
          'IFN-\u03B3' = 'IFN-y',
-         'IL-1\u03B2' = 'IL-1b')
+         'IL-1\u03B2' = 'IL-1b',
+         'GRO/KC' = 'GRO/KC/CINC-1')
 
 # Function to remove outliers using Tukey's Fences. Returns FALSE for outliers
 isnt_out_tukey <- function(x, k = 1.5, na.rm = TRUE) {
@@ -154,7 +155,7 @@ ggplot(data=df_stat_summary_group, mapping = aes(x=dep, y=p)) +
   theme(axis.text.x = element_text(angle = 90)) +
   labs (title = "Subsampling p-values from Mancova Test - Significance by Group", x = "Analyte", y = "p-value")
 
-ggsave('./Graphs/MANCOVAByGroup.png', device ='png')
+ggsave('../../Graphs/MANCOVAByGroup.png', device ='png')
 
 df_stat_summary_treatment <- 
   df_stat_summary %>% 
@@ -171,7 +172,7 @@ ggplot(data=df_stat_summary_treatment, mapping = aes(x=dep, y=p)) +
   theme(axis.text.x = element_text(angle = 90)) +
   labs (title = "Subsampling p-values from Mancova Test - Significance by Treatment", x = "Analyte", y = "p-value")
 
-ggsave('./Graphs/MANCOVAByTreatment.png', device ='png')
+ggsave('../../Graphs/MANCOVAByTreatment.png', device ='png')
 ```
 
 ```{r}
@@ -384,6 +385,15 @@ stderr <- function(x, na.rm=FALSE) {
   sqrt(var(x)/length(x))
 }
 
+df_type = read.csv('../../Data/Raw/Analyte Types.csv')
+df_type <- 
+  df_type %>% 
+  mutate(Analyte=str_replace(Analyte,'IL-1a', 'IL-1\u03B1'),
+         Analyte=str_replace(Analyte, 'MIP-1a', 'MIP-1\u03B1'),
+         Analyte=str_replace(Analyte,'TNF-a', 'TNF-\u03B1'),
+         Analyte=str_replace(Analyte, 'IFN-y', 'IFN-\u03B3'),
+         Analyte=str_replace(Analyte,'IL-1b', 'IL-1\u03B2'),
+         Analyte=str_replace(Analyte, 'GRO/KC/CINC-1', 'GRO/KC'))
 
 
 df_scaled_sig <-
@@ -424,17 +434,23 @@ df_test <-
     TRUE ~ ""
   ))
 
+df_test <-
+  left_join(df_test, df_type) %>% 
+  mutate(Type=factor(Type, levels=c("Pro-inflammatory", "Anti-inflammatory"))) %>% 
+  arrange(Type)
+
 ggplot(df_test, height= 30) +
-  geom_bar(aes(x = Analyte, y=mean), stat='identity', fill = 'deepskyblue3') +
+  geom_bar(aes(x = Analyte, y=mean, fill=Type), stat='identity') +
   geom_errorbar(aes(x=Analyte, ymin = mean-stderr, ymax= mean + stderr), width= 0.2) +
-  geom_text(aes(x=Analyte, y = mean+stderr + 0.3, label=aestrik), size=5) +
+  geom_text(aes(x=Analyte, y = mean+stderr + 0.2, label=aestrik), size=5) +
   facet_wrap(~Group, nrow = 3) +
   geom_hline(yintercept = 2, linetype = 'dashed') +
   theme_bw(base_size = 13) +
-  theme(axis.text.x = element_text(angle = 90)) +
+  ylim(0, max(df_test$mean + df_test$stderr + 0.5)) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) +
   labs(y = "Normalized Fluorescence")
 
-ggsave("./Graphs/everthang.png", device='png', height = 6.5, width = 6.5)
+ggsave("../../Graphs/everthang.png", device='png', height = 6.5, width = 6.5)
 
 ```
 
