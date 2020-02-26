@@ -54,60 +54,66 @@ df_no_out <-
 df <- df_no_out
 
 df_test <- (df %>% pivot_longer(cols = -Group, names_to = 'Analyte', values_to = 'Value')) %>% separate(Group, into=c("Group", "Treatment"), sep = " ")
-df_test <- 
-  df_test %>% 
-  mutate(row = row_number()) %>% 
-  pivot_wider(names_from='Treatment', values_from='Value') %>% 
-  group_by(Group, Analyte) %>% 
-  mutate(mean_ctrl = mean(`0`, na.rm=TRUE)) %>% 
+
+df_test <-
+  df_test %>%
+  mutate(row = row_number()) %>%
+  pivot_wider(names_from='Treatment', values_from='Value') %>%
+  group_by(Group, Analyte) %>%
+  mutate(mean_ctrl = mean(`0`, na.rm=TRUE)) %>%
+  mutate(std_ctrl = sd(`0`, na.rm = TRUE)) %>% 
   ungroup()
 
 
 df_test_scaled <-
-  df_test %>% 
-  mutate_at(vars(-Group, -Analyte, -mean_ctrl, -row), funs(((. - mean_ctrl)/sd(., na.rm = TRUE) + 2))) %>% 
-  select(-mean_ctrl) %>% 
-  pivot_longer(cols = c('0', '20', 'LPS'), names_to = 'Treatment', values_to = 'Value') 
+  df_test %>%
+  mutate_at(vars(-Group, -Analyte, -mean_ctrl, -row), funs(((. - mean_ctrl)/std_ctrl + 2))) %>%
+  select(-mean_ctrl, -std_ctrl) %>% 
+  pivot_longer(cols = c(-Group, -Analyte, -row), names_to = 'Treatment', values_to = 'Value') %>% 
+  pivot_wider(names_from = 'Analyte', values_from = 'Value') %>% 
+  select(-row)
 
-df_sep <- 
-  df %>% 
-  separate("Group", into=c("Group", "Treatment"), sep=" ")
 
-# Here we normalize so that the neam of the negative control is 2 (2 was chosen to avoid negative numbers for some analytes)
-df_splt_sep <-
-  df_sep %>% 
-  split(.$Group)
-
-df_scaled <-
-  lapply(names(df_splt_sep), function(group){
-    print(group)
-    means_df <-
-      df_sep %>% 
-      filter(Group == group, Treatment == "0") %>% 
-      group_by(Group, Treatment) %>% 
-      summarise_all(function(x) mean(x, na.rm = TRUE)) %>% 
-      ungroup
-  
-    
-    df_splt_sep[[group]] %>% 
-      mutate_if(is.numeric, funs ({
-        mean <- 
-          means_df %>%
-          select(quo_name(quo(.))) %>% 
-          pull
-        
-        ((. - mean)/(sd(., na.rm = TRUE)) + 2)  
-      }))
-  }) %>% bind_rows()
+# Here we normalize so that the mean of the negative control is 2 (2 was chosen to avoid negative numbers for some analytes)
+# df_splt_sep <-
+#   df_sep %>% 
+#   split(.$Group)
+# 
+# df_scaled <-
+#   lapply(names(df_splt_sep), function(group){
+#     print(group)
+#     means_df <-
+#       df_sep %>% 
+#       filter(Group == group, Treatment == "0") %>% 
+#       group_by(Group, Treatment) %>% 
+#       summarise_all(function(x) mean(x, na.rm = TRUE)) %>% 
+#       ungroup
+#     
+#     
+#   
+#     
+#     df_splt_sep[[group]] %>% 
+#       mutate_if(is.numeric, funs ({
+#         mean <- 
+#           means_df %>%
+#           select(quo_name(quo(.))) %>% 
+#           pull
+#         
+#         ((. - mean)/(sd(., na.rm = TRUE)) + 2)  
+#       }))
+#   }) %>% bind_rows()
+df_scaled <- df_test_scaled
 
 ```
+
 ```{r}
 
 df <-
   df_scaled %>% 
   filter(Treatment != '20') %>% 
   mutate(Treatment = replace(Treatment, Treatment == 'LPS', '10')) %>% 
-  unite(Group, Group, Treatment, sep = " ")
+  unite(Group, Group, Treatment, sep = " ") 
+
 
 df_grouped <-
   df %>% 
@@ -127,6 +133,7 @@ for (dataframe in df_splt_lst){
   na_counts <- apply(slice, 2, function(x) length(which(!is.na(x))))
   min_values <- c(min_values, min(na_counts))
 }
+
 min_value <- min(min_values)
 original_min_value <- min_value
 min_value <- roundDown(min_value)
@@ -148,6 +155,7 @@ df_stat_summary <-
     bind_rows() %>% 
     separate("Group", into=c("Group", "Treatment"), sep=" ") %>% 
     mutate(Treatment =  as.numeric(Treatment))
+  
   mancova(data=subsampled_df, deps=(analytes), factors=Group, covs=Treatment, multivar="hotel")$univar$asDF %>%
     filter(term == "Group" | term == "Treatment") %>% 
     select(term, dep, p)
@@ -405,11 +413,6 @@ stderr <- function(x, na.rm=FALSE) {
   sqrt(var(x)/length(x))
 }
 
-df_scaled <-
-  df_scaled %>% 
-  filter(Treatment != "20") %>% 
-  mutate(Treatment = replace(Treatment, Treatment=='LPS', '20'))
-
 df_type = read.csv('../../Data/Raw/Analyte Types.csv')
 df_type <- 
   df_type %>% 
@@ -421,20 +424,22 @@ df_type <-
          Analyte=str_replace(Analyte, 'GRO/KC/CINC-1', 'GRO/KC'))
 
 
+
 df_scaled_sig <-
-  df_scaled %>% 
+  df_test_scaled %>% 
+  filter(Treatment != "20") %>% 
   pivot_longer(cols = c(-Group, -Treatment), names_to='Analyte', values_to = 'Value') %>% 
   pivot_wider(names_from = 'Treatment', names_prefix = "treatment_", values_from = 'Value')
 
 df_scaled_sig <-
   df_scaled_sig %>% 
   group_by(Group, Analyte) %>% 
-  mutate(p_val = wilcox.test(unlist(treatment_0), unlist(treatment_20))$p.value) %>% 
+  mutate(p_val = wilcox.test(unlist(treatment_0), unlist(treatment_LPS))$p.value) %>% 
   select(Group, Analyte, p_val)
 
 df_scaled_means <-
-  df_scaled %>% 
-  filter(Treatment == '20') %>% 
+  df_test_scaled %>% 
+  filter(Treatment == 'LPS') %>% 
   group_by(Group, Treatment) %>% 
   summarise_if(is.numeric, list(~mean(., na.rm = TRUE), ~stderr(., na.rm = TRUE)))
 
@@ -472,10 +477,10 @@ ggplot(df_test, height= 30) +
   theme_bw(base_size = 13) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) +
   labs(y = "Normalized Fluorescence") + 
-  facet_wrap(~Group, nrow = 3, scales='free_y') +
-  ylim(0, max(df_test$mean + df_test$stderr + 0.5))
+  facet_wrap(~Group, nrow = 3, scales='free_y')
+  #ylim(0, max(df_test$mean + df_test$stderr + 0.5))
 
-ggsave("../../Graphs/everthang.png", device='png', height = 6.5, width = 6.5)
+ggsave("../../Graphs/everthang_LPS.png", device='png', height = 6.5, width = 6.5)
 
 ```
 
